@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+config.yaml
+.env
+*.log
+.git/
+.github/
+dev.sh

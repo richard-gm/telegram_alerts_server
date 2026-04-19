@@ -1,0 +1,35 @@
+{
+  "name": "trading-crypto-tracker",
+  "version": "1.0.0",
+  "description": "Smart money wallet tracker and Telegram alert system for crypto",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "better-sqlite3": "^12.9.0",
+    "express": "^5.2.1",
+    "js-yaml": "^4.1.0",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.64.0",
+    "winston": "^3.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/node-telegram-bot-api": "^0.64.7",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,69 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev
+  IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/wallet-tracker/app
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            -t ${{ env.IMAGE }}:${{ github.sha }} \
+            -t ${{ env.IMAGE }}:latest \
+            .
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy wallet-tracker \
+            --image "${{ env.IMAGE }}:${{ github.sha }}" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --max-instances 1 \
+            --memory 512Mi \
+            --cpu 1 \
+            --port 3000 \
+            --service-account "${{ secrets.GCP_RUN_SA_EMAIL }}" \
+            --add-volume "name=db,type=cloud-storage,bucket=${{ secrets.GCS_BUCKET_NAME }}" \
+            --add-volume-mount "volume=db,mount-path=/app/data" \
+            --set-env-vars "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" \
+            --set-env-vars "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --set-env-vars "ETHERSCAN_API_KEY=${{ secrets.ETHERSCAN_API_KEY }}" \
+            --set-env-vars "ALCHEMY_API_KEY=${{ secrets.ALCHEMY_API_KEY }}" \
+            --set-env-vars "ALCHEMY_AUTH_TOKEN=${{ secrets.ALCHEMY_AUTH_TOKEN }}" \
+            --set-env-vars "ALCHEMY_WEBHOOK_ID=${{ secrets.ALCHEMY_WEBHOOK_ID }}" \
+            --set-env-vars "ALCHEMY_WEBHOOK_SECRET=${{ secrets.ALCHEMY_WEBHOOK_SECRET }}" \
+            --set-env-vars "HELIUS_API_KEY=${{ secrets.HELIUS_API_KEY }}" \
+            --set-env-vars "HELIUS_WEBHOOK_ID=${{ secrets.HELIUS_WEBHOOK_ID }}" \
+            --set-env-vars "HELIUS_WEBHOOK_SECRET=${{ secrets.HELIUS_WEBHOOK_SECRET }}" \
+            --set-env-vars "WEBHOOK_PORT=3000" \
+            --set-env-vars "WEBHOOK_PUBLIC_URL=${{ secrets.WEBHOOK_PUBLIC_URL }}" \
+            --set-env-vars "SOLSCAN_API_KEY=${{ secrets.SOLSCAN_API_KEY }}" \
+            --set-env-vars "COINGECKO_API_KEY=${{ secrets.COINGECKO_API_KEY }}"
