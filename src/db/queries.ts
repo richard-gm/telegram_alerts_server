@@ -1,6 +1,6 @@
 import { getDb } from './schema';
 
-export type Chain = 'eth' | 'sol';
+export type Chain = 'eth' | 'sol' | 'base';
 
 export interface Wallet {
   address: string;
@@ -118,4 +118,81 @@ export function markAlerted(txHash: string): void {
 
 export function getPendingAlerts(): Trade[] {
   return getDb().prepare(`SELECT * FROM trades WHERE alerted = 0 ORDER BY timestamp ASC`).all() as Trade[];
+}
+
+// --- Dashboard helpers ---
+
+export function getAllWallets(): Wallet[] {
+  return getDb().prepare(`SELECT * FROM wallets ORDER BY discovered_at DESC`).all() as Wallet[];
+}
+
+export function getPendingWallets(): Wallet[] {
+  return getDb().prepare(`SELECT * FROM wallets WHERE qualified = 0 ORDER BY discovered_at DESC`).all() as Wallet[];
+}
+
+export function getRecentTrades(limit = 100, chain?: Chain): Trade[] {
+  if (chain) {
+    return getDb().prepare(`SELECT * FROM trades WHERE chain = ? ORDER BY timestamp DESC LIMIT ?`).all(chain, limit) as Trade[];
+  }
+  return getDb().prepare(`SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?`).all(limit) as Trade[];
+}
+
+export function pauseWallet(address: string): void {
+  getDb().prepare(`UPDATE wallets SET qualified = 2 WHERE address = ?`).run(address);
+}
+
+export function unpauseWallet(address: string): void {
+  getDb().prepare(`UPDATE wallets SET qualified = 1 WHERE address = ?`).run(address);
+}
+
+export function removeWallet(address: string): void {
+  getDb().prepare(`DELETE FROM wallets WHERE address = ?`).run(address);
+}
+
+// --- Processed Token Cache ---
+
+export function getProcessedToken(
+  tokenAddress: string, chain: Chain, timeWindow: string,
+): { processed_at: number; traders_found: number } | undefined {
+  return getDb().prepare(
+    `SELECT processed_at, traders_found FROM processed_tokens WHERE token_address = ? AND chain = ? AND time_window = ?`
+  ).get(tokenAddress, chain, timeWindow) as { processed_at: number; traders_found: number } | undefined;
+}
+
+export function upsertProcessedToken(
+  tokenAddress: string, chain: Chain, timeWindow: string, tradersFound: number,
+): void {
+  getDb().prepare(`
+    INSERT INTO processed_tokens (token_address, chain, time_window, processed_at, traders_found)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(token_address, chain, time_window) DO UPDATE SET
+      processed_at  = excluded.processed_at,
+      traders_found = excluded.traders_found
+  `).run(tokenAddress, chain, timeWindow, Math.floor(Date.now() / 1000), tradersFound);
+}
+
+// --- Debug Logs ---
+
+export function insertDebugLog(type: string, wallet: string | null, data: unknown): void {
+  getDb().prepare(
+    `INSERT INTO debug_logs (created_at, type, wallet, data) VALUES (?, ?, ?, ?)`
+  ).run(Math.floor(Date.now() / 1000), type, wallet ?? null, JSON.stringify(data));
+}
+
+export interface PurgeResult {
+  trades: number;
+  snapshots: number;
+  debugLogs: number;
+  wallets: number;
+}
+
+export function purgeOldData(retentionDays = 30): PurgeResult {
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  const db = getDb();
+  return db.transaction((): PurgeResult => ({
+    trades:    db.prepare(`DELETE FROM trades WHERE timestamp < ?`).run(cutoff).changes,
+    snapshots: db.prepare(`DELETE FROM portfolio_snapshots WHERE snapshotted_at < ?`).run(cutoff).changes,
+    debugLogs: db.prepare(`DELETE FROM debug_logs WHERE created_at < ?`).run(cutoff).changes,
+    wallets:   db.prepare(`DELETE FROM wallets WHERE qualified = -1 AND discovered_at < ?`).run(cutoff).changes,
+  }))();
 }

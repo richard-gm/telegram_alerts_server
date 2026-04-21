@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import axios from 'axios';
 import { getConfig, patchConfig } from '../config/config';
 import { getQualifiedWallets } from '../db/queries';
@@ -9,53 +10,60 @@ function apiUrl(path: string): string {
   return `${BASE}${path}?api-key=${getConfig().helius.api_key}`;
 }
 
+async function createWebhook(firstAddress: string): Promise<string> {
+  const cfg = getConfig();
+  const secret = cfg.helius.webhook_secret || generateSecret();
+  let resp;
+  try {
+    resp = await axios.post(apiUrl('/v0/webhooks'), {
+      webhookURL: `${cfg.webhook.public_url}/webhook/helius`,
+      transactionTypes: ['Any'],
+      accountAddresses: [firstAddress],
+      webhookType: 'enhanced',
+      authHeader: secret,
+    });
+  } catch (err) {
+    const body = (err as { response?: { data?: unknown } })?.response?.data;
+    throw new Error(`Helius webhook create failed: ${JSON.stringify(body)}`);
+  }
+  const webhookId = (resp.data.webhookID ?? resp.data.id) as string;
+  patchConfig({ helius: { ...cfg.helius, webhook_id: webhookId, webhook_secret: secret } });
+  logger.info(`Helius webhook created: ${webhookId}`);
+  return webhookId;
+}
+
 export async function initHeliusWebhook(): Promise<void> {
   const cfg = getConfig();
   if (!cfg.helius.api_key) {
     logger.warn('Helius api_key not set — skipping Helius webhook init');
     return;
   }
-  if (!cfg.webhook.public_url) {
-    logger.warn('webhook.public_url not set — cannot register Helius webhook');
+
+  const webhookId = cfg.helius.webhook_id;
+  if (!webhookId) {
+    // No webhook yet — will be created lazily when first SOL wallet is approved
+    logger.info('Helius webhook not yet created — will be created on first SOL wallet approval');
     return;
   }
 
-  let webhookId = cfg.helius.webhook_id;
+  // Verify the existing webhook is still alive
+  try {
+    await axios.get(apiUrl(`/v0/webhooks/${webhookId}`));
+    logger.info(`Helius webhook ${webhookId} verified`);
 
-  if (webhookId) {
-    try {
-      await axios.get(apiUrl(`/v0/webhooks/${webhookId}`));
-      logger.info(`Helius webhook ${webhookId} already exists`);
-    } catch {
-      logger.warn(`Helius webhook ${webhookId} not found — creating new one`);
-      webhookId = '';
+    // Sync any qualified SOL wallets that may have been added while webhook was offline
+    const wallets = getQualifiedWallets('sol');
+    if (wallets.length > 0) {
+      await bulkAddSolAddresses(webhookId, wallets.map(w => w.address));
+      logger.info(`Helius: synced ${wallets.length} existing SOL wallets`);
     }
-  }
-
-  if (!webhookId) {
-    const secret = cfg.helius.webhook_secret || generateSecret();
-    const resp = await axios.post(apiUrl('/v0/webhooks'), {
-      webhookURL: `${cfg.webhook.public_url}/webhook/helius`,
-      transactionTypes: ['SWAP'],
-      accountAddresses: [],
-      webhookType: 'enhanced',
-      authHeader: secret,
-    });
-    webhookId = resp.data.webhookID as string;
-    patchConfig({ helius: { ...cfg.helius, webhook_id: webhookId, webhook_secret: secret } });
-    logger.info(`Helius webhook created: ${webhookId}`);
-  }
-
-  // Sync all existing qualified SOL wallets
-  const wallets = getQualifiedWallets('sol');
-  if (wallets.length > 0) {
-    await bulkAddSolAddresses(webhookId, wallets.map(w => w.address));
-    logger.info(`Helius: synced ${wallets.length} existing SOL wallets`);
+  } catch {
+    logger.warn(`Helius webhook ${webhookId} not found — will recreate on next SOL wallet approval`);
+    patchConfig({ helius: { ...cfg.helius, webhook_id: '' } });
   }
 }
 
 async function bulkAddSolAddresses(webhookId: string, newAddresses: string[]): Promise<void> {
-  // Helius PUT replaces the full address list, so fetch existing first
   const resp = await axios.get(apiUrl(`/v0/webhooks/${webhookId}`));
   const existing: string[] = resp.data.accountAddresses ?? [];
   const merged = Array.from(new Set([...existing, ...newAddresses]));
@@ -71,18 +79,24 @@ async function bulkAddSolAddresses(webhookId: string, newAddresses: string[]): P
 
 export async function addSolAddress(address: string): Promise<void> {
   const cfg = getConfig();
-  if (!cfg.helius.webhook_id) {
-    logger.warn('Helius webhook_id not set — cannot add address');
+  if (!cfg.helius.api_key) {
+    logger.warn('Helius api_key not set — cannot register SOL wallet');
     return;
   }
   try {
-    await bulkAddSolAddresses(cfg.helius.webhook_id, [address]);
-    logger.info(`Helius: added ${address} to webhook`);
+    let webhookId = cfg.helius.webhook_id;
+    if (!webhookId) {
+      // Create webhook with this first address
+      webhookId = await createWebhook(address);
+    } else {
+      await bulkAddSolAddresses(webhookId, [address]);
+    }
+    logger.info(`Helius: registered ${address}`);
   } catch (err) {
     logger.error('Helius addSolAddress failed', { err, address });
   }
 }
 
 function generateSecret(): string {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return randomBytes(32).toString('hex');
 }

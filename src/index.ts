@@ -5,20 +5,20 @@ import { runDiscovery } from './discovery/discoveryRunner';
 import { scoreTrader } from './analysis/scorer';
 import { snapshotEthPortfolio } from './portfolio/ethPortfolio';
 import { snapshotSolPortfolio } from './portfolio/solPortfolio';
-import { qualifyWallet, disqualifyWallet, getQualifiedWallets, getWallet } from './db/queries';
+import { qualifyWallet, disqualifyWallet, getQualifiedWallets, getWallet, purgeOldData } from './db/queries';
 import { sendStartupMessage, sendWalletApprovalRequest, sendWalletApprovedConfirmation, initBotCallbackHandler } from './alerts/telegram';
-import { initAlchemyWebhook, addEthAddress } from './webhooks/alchemyClient';
+import { startEthMonitor } from './monitor/ethMonitor';
 import { initHeliusWebhook, addSolAddress } from './webhooks/heliusClient';
 import { startWebhookServer } from './webhooks/server';
 import logger from './logger';
 
-async function onWalletApproved(address: string, chain: 'eth' | 'sol'): Promise<void> {
+async function onWalletApproved(address: string, chain: 'eth' | 'sol' | 'base'): Promise<void> {
   try {
     qualifyWallet(address);
 
-    if (chain === 'eth') {
-      await snapshotEthPortfolio(address);
-      await addEthAddress(address);
+    if (chain === 'eth' || chain === 'base') {
+      await snapshotEthPortfolio(address, chain);
+      // EVM monitoring handled by polling loop — no webhook registration needed
     } else {
       await snapshotSolPortfolio(address);
       await addSolAddress(address);
@@ -36,10 +36,10 @@ async function onWalletSkipped(address: string): Promise<void> {
   logger.info(`Wallet skipped: ${address}`);
 }
 
-async function runFullDiscovery(): Promise<void> {
-  logger.info('=== Starting discovery cycle ===');
+async function runFullDiscovery(timeWindow: '7d' | '30d' = '30d'): Promise<void> {
+  logger.info(`=== Starting discovery cycle (${timeWindow}) ===`);
   try {
-    const traders = await runDiscovery();
+    const traders = await runDiscovery(timeWindow);
     logger.info(`Scoring ${traders.length} discovered wallets...`);
 
     let proposedCount = 0;
@@ -64,14 +64,15 @@ async function main(): Promise<void> {
 
   initDb();
   logger.info('Database initialized');
+  const purged = purgeOldData(30);
+  const purgedTotal = purged.trades + purged.snapshots + purged.debugLogs + purged.wallets;
+  if (purgedTotal > 0) {
+    logger.info(`Purged data older than 30 days — trades:${purged.trades} snapshots:${purged.snapshots} logs:${purged.debugLogs} wallets:${purged.wallets}`);
+  }
 
   // Start Telegram bot polling and register approval callbacks
   initBotCallbackHandler(onWalletApproved, onWalletSkipped);
 
-  // Register/verify webhooks — non-fatal: app still runs discovery if providers are unreachable
-  await initAlchemyWebhook().catch(err =>
-    logger.error(`Alchemy webhook init failed: ${err instanceof Error ? err.message : err}`)
-  );
   await initHeliusWebhook().catch(err =>
     logger.error(`Helius webhook init failed: ${err instanceof Error ? err.message : err}`)
   );
@@ -82,15 +83,28 @@ async function main(): Promise<void> {
   // Send startup notification
   await sendStartupMessage();
 
-  // Run an immediate discovery on startup
-  await runFullDiscovery();
+  // Start Etherscan polling monitor for approved ETH and Base wallets
+  startEthMonitor(cfg.monitor.eth_poll_interval_seconds, 'eth');
+  startEthMonitor(cfg.monitor.base_poll_interval_seconds, 'base');
 
-  // Schedule discovery on configured interval
+  // Run both discovery windows immediately on startup
+  await runFullDiscovery('30d');
+  await runFullDiscovery('7d');
+
+  // Schedule 30d discovery on configured interval
   const discoveryHours = cfg.discovery.interval_hours;
   const discoveryCron = `0 */${discoveryHours} * * *`;
-  logger.info(`Scheduling discovery every ${discoveryHours}h (cron: ${discoveryCron})`);
+  logger.info(`Scheduling 30d discovery every ${discoveryHours}h (cron: ${discoveryCron})`);
   cron.schedule(discoveryCron, () => {
-    runFullDiscovery().catch(err => logger.error('Scheduled discovery failed', { err }));
+    runFullDiscovery('30d').catch(err => logger.error('Scheduled 30d discovery failed', { err }));
+  });
+
+  // Schedule weekly 7d discovery (Monday 09:00 by default, configurable via weekly_discovery_day)
+  const weeklyDay = cfg.discovery.weekly_discovery_day;
+  const weeklyCron = `0 9 * * ${weeklyDay}`;
+  logger.info(`Scheduling weekly 7d discovery on day ${weeklyDay} (cron: ${weeklyCron})`);
+  cron.schedule(weeklyCron, () => {
+    runFullDiscovery('7d').catch(err => logger.error('Scheduled 7d discovery failed', { err }));
   });
 
   logger.info('Smart Wallet Tracker running. Press Ctrl+C to stop.');

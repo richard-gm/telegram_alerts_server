@@ -11,14 +11,31 @@ function getBot(): TelegramBot {
     if (!cfg.telegram.bot_token) throw new Error('Telegram bot_token not configured in config.yaml');
     // polling: true enables receiving callback_query events from inline keyboards
     _bot = new TelegramBot(cfg.telegram.bot_token, { polling: true });
-    _bot.on('polling_error', err => logger.error('Telegram polling error', { err }));
+    let _conflictLogged = false;
+    _bot.on('polling_error', err => {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 409 Conflict means another instance is already polling — log once then suppress
+      if (msg.includes('409')) {
+        if (!_conflictLogged) {
+          logger.error('Telegram 409 Conflict: another bot instance is already running. Stop the other process.');
+          _conflictLogged = true;
+        }
+        return;
+      }
+      // Transient network resets — bot auto-reconnects, no action needed
+      if (msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('ECONNREFUSED') || msg.includes('EFATAL')) {
+        logger.warn('Telegram polling: connection reset, reconnecting...');
+        return;
+      }
+      logger.error('Telegram polling error', { err });
+    });
   }
   return _bot;
 }
 
 export interface TradeAlertParams {
   wallet: string;
-  chain: 'eth' | 'sol';
+  chain: 'eth' | 'sol' | 'base';
   action: 'buy' | 'sell';
   tokenSymbol: string;
   txHash: string;
@@ -28,7 +45,7 @@ export interface TradeAlertParams {
   sourceToken: string | null;
 }
 
-type ApproveCallback = (address: string, chain: 'eth' | 'sol') => Promise<void>;
+type ApproveCallback = (address: string, chain: 'eth' | 'sol' | 'base') => Promise<void>;
 type SkipCallback = (address: string) => Promise<void>;
 
 export function initBotCallbackHandler(onApprove: ApproveCallback, onSkip: SkipCallback): void {
@@ -37,7 +54,7 @@ export function initBotCallbackHandler(onApprove: ApproveCallback, onSkip: SkipC
   bot.on('callback_query', async (query) => {
     if (!query.data) return;
 
-    const [action, chain, address] = query.data.split(':') as [string, 'eth' | 'sol', string];
+    const [action, chain, address] = query.data.split(':') as [string, 'eth' | 'sol' | 'base', string];
 
     try {
       if (action === 'approve') {
@@ -57,16 +74,17 @@ export function initBotCallbackHandler(onApprove: ApproveCallback, onSkip: SkipC
   });
 }
 
-function explorerLinks(chain: 'eth' | 'sol', wallet: string, txHash: string): { walletUrl: string; txUrl: string } {
-  if (chain === 'eth') {
-    return {
-      walletUrl: `https://etherscan.io/address/${wallet}`,
-      txUrl: `https://etherscan.io/tx/${txHash}`,
-    };
-  }
+function explorerWalletUrl(chain: 'eth' | 'sol' | 'base', address: string): string {
+  if (chain === 'base') return `https://basescan.org/address/${address}`;
+  if (chain === 'eth') return `https://etherscan.io/address/${address}`;
+  return `https://solscan.io/account/${address}`;
+}
+
+function explorerLinks(chain: 'eth' | 'sol' | 'base', wallet: string, txHash: string): { walletUrl: string; txUrl: string } {
+  const txBase = chain === 'base' ? 'https://basescan.org/tx' : chain === 'eth' ? 'https://etherscan.io/tx' : 'https://solscan.io/tx';
   return {
-    walletUrl: `https://solscan.io/account/${wallet}`,
-    txUrl: `https://solscan.io/tx/${txHash}`,
+    walletUrl: explorerWalletUrl(chain, wallet),
+    txUrl: `${txBase}/${txHash}`,
   };
 }
 
@@ -85,7 +103,7 @@ function formatPnl(pnl: number | null): string {
 function buildMessage(params: TradeAlertParams): string {
   const { wallet, chain, action, tokenSymbol, txHash, isNewPosition, winRate, totalPnl, sourceToken } = params;
   const { walletUrl, txUrl } = explorerLinks(chain, wallet, txHash);
-  const chainLabel = chain === 'eth' ? 'Ethereum' : 'Solana';
+  const chainLabel = chain === 'eth' ? 'Ethereum' : chain === 'base' ? 'Base' : 'Solana';
   const actionEmoji = action === 'buy' ? '🟢' : '🔴';
   const actionLabel = action === 'buy' ? 'BUY' : 'SELL';
 
@@ -140,9 +158,7 @@ export async function sendWalletApprovalRequest(score: WalletScore): Promise<voi
   if (!cfg.telegram.bot_token || !cfg.telegram.chat_id) return;
 
   const chain = score.chain.toUpperCase();
-  const explorerBase = score.chain === 'eth'
-    ? `https://etherscan.io/address/${score.address}`
-    : `https://solscan.io/account/${score.address}`;
+  const explorerBase = explorerWalletUrl(score.chain, score.address);
 
   const message = [
     `🔍 *New wallet found*`,
@@ -171,12 +187,12 @@ export async function sendWalletApprovalRequest(score: WalletScore): Promise<voi
   }
 }
 
-export async function sendWalletApprovedConfirmation(address: string, chain: 'eth' | 'sol', messageId?: number, chatId?: string | number): Promise<void> {
+export async function sendWalletApprovedConfirmation(address: string, chain: 'eth' | 'sol' | 'base', messageId?: number, chatId?: string | number): Promise<void> {
   const cfg = getConfig();
   if (!cfg.telegram.bot_token || !cfg.telegram.chat_id) return;
 
   const bot = getBot();
-  const text = `✅ *Now watching* [${shortAddress(address)}](${chain === 'eth' ? `https://etherscan.io/address/${address}` : `https://solscan.io/account/${address}`}) \\(${chain.toUpperCase()}\\)`;
+  const text = `✅ *Now watching* [${shortAddress(address)}](${explorerWalletUrl(chain, address)}) \\(${chain.toUpperCase()}\\)`;
 
   try {
     if (messageId && chatId) {

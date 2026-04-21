@@ -1,5 +1,5 @@
 import { getConfig } from '../config/config';
-import { upsertWallet, getWallet } from '../db/queries';
+import { upsertWallet, getWallet, disqualifyWallet } from '../db/queries';
 import { scoreEthWallet } from './ethAnalyzer';
 import { scoreSolWallet } from './solAnalyzer';
 import { TopTrader } from '../discovery/dexScreener';
@@ -7,7 +7,7 @@ import logger from '../logger';
 
 export interface WalletScore {
   address: string;
-  chain: 'eth' | 'sol';
+  chain: 'eth' | 'sol' | 'base';
   win_rate: number;
   total_pnl: number;
   trade_count: number;
@@ -19,15 +19,17 @@ export interface WalletScore {
 export async function scoreTrader(trader: TopTrader): Promise<WalletScore | null> {
   const existing = getWallet(trader.wallet);
 
-  // Already qualified — skip re-analysis
-  if (existing?.qualified === 1) return null;
-  // Previously skipped — don't re-propose
-  if (existing?.qualified === -1) return null;
+  if (existing) {
+    // Already in DB — skip re-analysis regardless of status
+    // qualified=1: active, qualified=-1: disqualified, qualified=0: pending approval
+    logger.debug(`Wallet ${trader.wallet} already in DB (qualified=${existing.qualified}) — skipping re-scan`);
+    return null;
+  }
 
   logger.debug(`Scoring ${trader.chain.toUpperCase()} wallet ${trader.wallet}`);
 
-  const score = trader.chain === 'eth'
-    ? await scoreEthWallet(trader.wallet)
+  const score = trader.chain === 'eth' || trader.chain === 'base'
+    ? await scoreEthWallet(trader.wallet, trader.chain)
     : await scoreSolWallet(trader.wallet);
 
   if (!score) {
@@ -55,10 +57,18 @@ export async function scoreTrader(trader: TopTrader): Promise<WalletScore | null
     score.best_multiplier >= cfg.scoring.min_pnl_multiplier;
 
   if (!qualifies) {
-    logger.debug(
-      `Wallet ${score.address} did not meet thresholds ` +
-      `(win_rate=${(score.win_rate * 100).toFixed(0)}% pnl=$${score.total_pnl.toFixed(0)})`
-    );
+    disqualifyWallet(score.address);
+    const reasons = [
+      score.win_rate < cfg.scoring.min_win_rate
+        ? `win_rate=${(score.win_rate * 100).toFixed(0)}% < ${(cfg.scoring.min_win_rate * 100).toFixed(0)}%` : null,
+      score.total_pnl < cfg.scoring.min_pnl_usd
+        ? `pnl=$${score.total_pnl.toFixed(0)} < $${cfg.scoring.min_pnl_usd}` : null,
+      score.trade_count < cfg.scoring.min_trade_count
+        ? `trades=${score.trade_count} < ${cfg.scoring.min_trade_count}` : null,
+      score.best_multiplier < cfg.scoring.min_pnl_multiplier
+        ? `best_mult=${score.best_multiplier.toFixed(1)}x < ${cfg.scoring.min_pnl_multiplier}x` : null,
+    ].filter(Boolean).join(', ');
+    logger.info(`Wallet ${score.address} (${score.chain.toUpperCase()}) FAILED — ${reasons}`);
     return null;
   }
 

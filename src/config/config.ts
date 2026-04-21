@@ -17,12 +17,6 @@ const ConfigSchema = z.object({
   coingecko: z.object({
     api_key: z.string().default(''),
   }),
-  alchemy: z.object({
-    api_key: z.string().default(''),
-    auth_token: z.string().default(''),
-    webhook_id: z.string().default(''),
-    webhook_secret: z.string().default(''),
-  }).default({}),
   helius: z.object({
     api_key: z.string().default(''),
     webhook_id: z.string().default(''),
@@ -39,11 +33,16 @@ const ConfigSchema = z.object({
     min_pnl_multiplier: z.number().default(5.0),
     lookback_days: z.number().int().default(30),
   }),
+  monitor: z.object({
+    eth_poll_interval_seconds: z.number().int().default(30),
+    base_poll_interval_seconds: z.number().int().default(30),
+  }).default({}),
   discovery: z.object({
     interval_hours: z.number().default(6),
     coingecko_top_n: z.number().int().default(20),
     min_dex_volume_usd: z.number().default(50000),
     traders_per_token: z.number().int().default(10),
+    weekly_discovery_day: z.number().int().min(0).max(6).default(1), // 0=Sun,1=Mon,...,6=Sat
   }),
 });
 

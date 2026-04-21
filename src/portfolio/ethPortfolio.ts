@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { getConfig } from '../config/config';
 import { upsertSnapshot } from '../db/queries';
+import { EvmChain, EVM_CHAIN_ID } from '../analysis/ethAnalyzer';
 import logger from '../logger';
 
 interface EtherscanTokenHolding {
@@ -19,24 +20,26 @@ async function rateLimit(): Promise<void> {
   _lastCall = Date.now();
 }
 
-export async function snapshotEthPortfolio(address: string): Promise<void> {
+export async function snapshotEthPortfolio(address: string, chain: EvmChain = 'eth'): Promise<void> {
   const cfg = getConfig();
   await rateLimit();
 
+  const apiKey = cfg.etherscan.api_key || 'YourApiKeyToken';
+
   try {
-    // Fetch ERC-20 token list for the address
-    const resp = await axios.get('https://api.etherscan.io/api', {
+    const resp = await axios.get('https://api.etherscan.io/v2/api', {
       params: {
+        chainid: EVM_CHAIN_ID[chain],
         module: 'account',
-        action: 'tokenlist',   // returns list of tokens with non-zero balance
+        action: 'tokenlist',
         address,
-        apikey: cfg.etherscan.api_key || 'YourApiKeyToken',
+        apikey: apiKey,
       },
       timeout: 15000,
     });
 
     if (resp.data.status !== '1') {
-      logger.debug(`ETH portfolio: no tokens found for ${address}`);
+      logger.debug(`${chain.toUpperCase()} portfolio: no tokens found for ${address}`);
       return;
     }
 
@@ -46,26 +49,26 @@ export async function snapshotEthPortfolio(address: string): Promise<void> {
     for (const token of tokens) {
       upsertSnapshot({
         wallet: address.toLowerCase(),
-        chain: 'eth',
+        chain,
         token_address: token.contractAddress.toLowerCase(),
         token_symbol: token.tokenSymbol,
-        balance: '1', // presence is what matters — DeBank Pro would give exact balance
+        balance: '1',
         snapshotted_at: now,
       });
     }
 
-    // Always include native ETH
+    // Always include native ETH (used on both Ethereum and Base)
     upsertSnapshot({
       wallet: address.toLowerCase(),
-      chain: 'eth',
+      chain,
       token_address: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
       token_symbol: 'ETH',
       balance: '1',
       snapshotted_at: now,
     });
 
-    logger.debug(`ETH portfolio snapshot: ${tokens.length} tokens for ${address}`);
+    logger.debug(`${chain.toUpperCase()} portfolio snapshot: ${tokens.length} tokens for ${address}`);
   } catch (err) {
-    logger.error(`ETH portfolio snapshot error for ${address}`, { err });
+    logger.error(`${chain.toUpperCase()} portfolio snapshot error for ${address}`, { err });
   }
 }

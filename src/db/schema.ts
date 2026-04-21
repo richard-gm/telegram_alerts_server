@@ -60,11 +60,29 @@ function applySchema(db: Database.Database): Database.Database {
       alerted         INTEGER DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS processed_tokens (
+      token_address TEXT    NOT NULL,
+      chain         TEXT    NOT NULL,
+      time_window   TEXT    NOT NULL,
+      processed_at  INTEGER NOT NULL,
+      traders_found INTEGER DEFAULT 0,
+      PRIMARY KEY (token_address, chain, time_window)
+    );
+
+    CREATE TABLE IF NOT EXISTS debug_logs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at INTEGER NOT NULL,
+      type       TEXT NOT NULL,
+      wallet     TEXT,
+      data       TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_wallets_qualified ON wallets(qualified);
     CREATE INDEX IF NOT EXISTS idx_wallets_chain ON wallets(chain);
     CREATE INDEX IF NOT EXISTS idx_portfolio_wallet ON portfolio_snapshots(wallet, chain);
     CREATE INDEX IF NOT EXISTS idx_trades_wallet ON trades(wallet);
     CREATE INDEX IF NOT EXISTS idx_trades_alerted ON trades(alerted);
+    CREATE INDEX IF NOT EXISTS idx_debug_logs_created ON debug_logs(created_at);
   `);
   return db;
 }

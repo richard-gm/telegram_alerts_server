@@ -2,9 +2,16 @@ import axios from 'axios';
 import { getConfig } from '../config/config';
 import logger from '../logger';
 
+export type EvmChain = 'eth' | 'base';
+
+export const EVM_CHAIN_ID: Record<EvmChain, number> = {
+  eth: 1,
+  base: 8453,
+};
+
 export interface WalletScore {
   address: string;
-  chain: 'eth';
+  chain: EvmChain;
   win_rate: number;
   total_pnl: number;
   trade_count: number;
@@ -12,7 +19,7 @@ export interface WalletScore {
   best_multiplier: number;
 }
 
-interface EtherscanTokenTx {
+export interface EtherscanTokenTx {
   hash: string;
   blockNumber: string;
   timeStamp: string;
@@ -46,7 +53,7 @@ const DEX_ROUTERS = new Set([
   '0x1111111254eeb25477b68fb85ed929f73a960582', // 1inch v5
 ]);
 
-const ETHERSCAN_BASE = 'https://api.etherscan.io/api';
+const ETHERSCAN_BASE = 'https://api.etherscan.io/v2/api';
 const STABLECOINS = new Set(['USDT', 'USDC', 'DAI', 'BUSD', 'FRAX', 'TUSD', 'USDP']);
 
 // Simple token-bucket for Etherscan's 5 req/s free tier
@@ -58,19 +65,27 @@ async function etherscanRateLimit(): Promise<void> {
   _lastEtherscanCall = Date.now();
 }
 
-async function fetchTokenTxs(address: string, startTimestamp: number): Promise<EtherscanTokenTx[]> {
+export async function fetchTokenTxs(
+  address: string,
+  startTimestamp: number,
+  startBlock = '0',
+  chain: EvmChain = 'eth',
+): Promise<EtherscanTokenTx[]> {
   const cfg = getConfig();
   await etherscanRateLimit();
 
+  const apiKey = cfg.etherscan.api_key || 'YourApiKeyToken';
+
   const resp = await axios.get(ETHERSCAN_BASE, {
     params: {
+      chainid: EVM_CHAIN_ID[chain],
       module: 'account',
       action: 'tokentx',
       address,
-      startblock: 0,
+      startblock: startBlock,
       endblock: 99999999,
       sort: 'asc',
-      apikey: cfg.etherscan.api_key || 'YourApiKeyToken',
+      apikey: apiKey,
     },
     timeout: 15000,
   });
@@ -78,8 +93,12 @@ async function fetchTokenTxs(address: string, startTimestamp: number): Promise<E
   if (resp.data.status !== '1') return [];
 
   const txs: EtherscanTokenTx[] = resp.data.result ?? [];
-  return txs.filter(tx => parseInt(tx.timeStamp) >= startTimestamp);
+  return startTimestamp > 0
+    ? txs.filter(tx => parseInt(tx.timeStamp) >= startTimestamp)
+    : txs;
 }
+
+export { etherscanRateLimit };
 
 function reconstructSwaps(address: string, txs: EtherscanTokenTx[]): Swap[] {
   const addr = address.toLowerCase();
@@ -171,12 +190,12 @@ function computePnL(swaps: Swap[]): {
   return { win_rate, total_pnl, best_multiplier };
 }
 
-export async function scoreEthWallet(address: string): Promise<WalletScore | null> {
+export async function scoreEthWallet(address: string, chain: EvmChain = 'eth'): Promise<WalletScore | null> {
   const cfg = getConfig();
   const lookbackTs = Math.floor(Date.now() / 1000) - cfg.scoring.lookback_days * 86400;
 
   try {
-    const txs = await fetchTokenTxs(address, lookbackTs);
+    const txs = await fetchTokenTxs(address, lookbackTs, '0', chain);
     if (txs.length === 0) return null;
 
     const swaps = reconstructSwaps(address, txs);
@@ -187,7 +206,7 @@ export async function scoreEthWallet(address: string): Promise<WalletScore | nul
 
     return {
       address: address.toLowerCase(),
-      chain: 'eth',
+      chain,
       win_rate,
       total_pnl,
       trade_count: swaps.length,
@@ -195,7 +214,7 @@ export async function scoreEthWallet(address: string): Promise<WalletScore | nul
       best_multiplier,
     };
   } catch (err) {
-    logger.error(`ETH analyzer error for ${address}`, { err });
+    logger.error(`${chain.toUpperCase()} analyzer error for ${address}`, { err });
     return null;
   }
 }
